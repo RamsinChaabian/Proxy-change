@@ -50,7 +50,7 @@
             // 
             this.btnChange.Location = new System.Drawing.Point(107, 143);
             this.btnChange.Name = "btnChange";
-            this.btnChange.Size = new System.Drawing.Size(93, 20);
+            this.btnChange.Size = new System.Drawing.Size(93, 22);
             this.btnChange.TabIndex = 2;
             this.btnChange.Text = "Change Proxy";
             this.btnChange.UseVisualStyleBackColor = true;
@@ -60,7 +60,7 @@
             // 
             this.btnReset.Location = new System.Drawing.Point(107, 176);
             this.btnReset.Name = "btnReset";
-            this.btnReset.Size = new System.Drawing.Size(93, 20);
+            this.btnReset.Size = new System.Drawing.Size(93, 22);
             this.btnReset.TabIndex = 3;
             this.btnReset.Text = "Reset";
             this.btnReset.UseVisualStyleBackColor = true;
@@ -102,7 +102,7 @@
             // 
             this.btnExit.Location = new System.Drawing.Point(107, 209);
             this.btnExit.Name = "btnExit";
-            this.btnExit.Size = new System.Drawing.Size(93, 20);
+            this.btnExit.Size = new System.Drawing.Size(93, 22);
             this.btnExit.TabIndex = 4;
             this.btnExit.Text = "Exit";
             this.btnExit.UseVisualStyleBackColor = true;
@@ -129,7 +129,7 @@
             // 
             this.bunifuDragControl1.Fixed = true;
             this.bunifuDragControl1.Horizontal = true;
-            this.bunifuDragControl1.TargetControl = this;
+            this.bunifuDragControl1.TargetControl = this.bunifuGradientPanel1;
             this.bunifuDragControl1.Vertical = true;
             // 
             // bunifuGradientPanel1
