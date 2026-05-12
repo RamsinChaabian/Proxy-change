@@ -1,6 +1,6 @@
 /**
  * Proxy Switcher v2.0 - Glass Widget Edition (Light Theme)
- * Build: gcc -O2 -s proxy.c -o ProxySwitcher.exe -lgdi32 -luser32 -lkernel32 -ladvapi32 -lwininet -lshell32 -ldwmapi -lcomctl32 -lmsimg32 -mwindows -municode
+ * Build: gcc -O2 -s proxy.c -o ProxySwitcher.exe -lgdi32 -luser32 -lkernel32 -ladvapi32 -lwininet -lshell32 -ldwmapi -lcomctl32 -lmsimg32 -mwindows
  */
 
 #define UNICODE
@@ -67,6 +67,8 @@ POINT           g_lastMouse         = {0};
 BOOL            g_dragging          = FALSE;
 WNDPROC         g_oldIPProc         = NULL;
 WNDPROC         g_oldPortProc       = NULL;
+HMENU           g_hTrayMenu         = NULL;
+HANDLE          g_hMutex            = NULL;  // برای تک‌نسخه بودن برنامه
 
 // ==================== Forward Declarations ====================
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -82,6 +84,7 @@ void GetCurrentProxy(wchar_t* ip, size_t ipSize, wchar_t* port, size_t portSize)
 void AddTrayIcon(HWND);
 void RemoveTrayIcon(void);
 void ShowTrayMenu(HWND);
+void UpdateTrayIcon(BOOL enabled);
 HICON CreateNeonIcon(BOOL active);
 void PaintWindow(HWND hWnd, HDC hdc);
 void DrawRoundedButton(HDC hdc, RECT* rc, COLORREF bg, BOOL hover, BOOL pressed);
@@ -91,6 +94,22 @@ COLORREF LightenColor(COLORREF color, int amount);
 // ==================== WinMain ====================
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
+    // اطمینان از تک‌نسخه بودن برنامه
+    g_hMutex = CreateMutexW(NULL, TRUE, L"Global\\ProxySwitcher_Unique_Mutex");
+    if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        // نسخه دیگری از برنامه در حال اجراست
+        HWND hWndExisting = FindWindowW(APP_NAME, NULL);
+        if (hWndExisting)
+        {
+            // اگر پنجره مخفی است، آن را نشان بده
+            if (!IsWindowVisible(hWndExisting))
+                ShowWindow(hWndExisting, SW_SHOW);
+            SetForegroundWindow(hWndExisting);
+        }
+        return 0;
+    }
+    
     g_hInst = hInstance;
     
     INITCOMMONCONTROLSEX icc = {sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES};
@@ -106,6 +125,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_proxyEnabled = IsProxyEnabled();
     UpdateProxyStatusUI();
     AddTrayIcon(g_hWnd);
+    UpdateTrayIcon(g_proxyEnabled);
     
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0))
@@ -115,6 +135,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
     
     RemoveTrayIcon();
+    
+    if (g_hMutex) CloseHandle(g_hMutex);
+    
     return (int)msg.wParam;
 }
 
@@ -431,6 +454,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         SetProxyState(TRUE);
                         g_proxyEnabled = TRUE;
                         UpdateProxyStatusUI();
+                        UpdateTrayIcon(g_proxyEnabled);
                     }
                     else
                     {
@@ -444,6 +468,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     g_proxyEnabled = !g_proxyEnabled;
                     SetProxyState(g_proxyEnabled);
                     UpdateProxyStatusUI();
+                    UpdateTrayIcon(g_proxyEnabled);
                     break;
                 }
                 
@@ -460,14 +485,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         
         case WM_TRAYICON:
         {
-            if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONDOWN)
+            if (lParam == WM_LBUTTONDOWN)
             {
-                ShowWindow(hWnd, SW_SHOW);
-                SetForegroundWindow(hWnd);
+                if (IsWindowVisible(g_hWnd))
+                    ShowWindow(g_hWnd, SW_HIDE);
+                else
+                {
+                    ShowWindow(g_hWnd, SW_SHOW);
+                    SetForegroundWindow(g_hWnd);
+                }
             }
             else if (lParam == WM_RBUTTONUP)
             {
-                ShowTrayMenu(hWnd);
+                ShowTrayMenu(g_hWnd);
             }
             return 0;
         }
@@ -478,6 +508,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (g_hFontUI) DeleteObject(g_hFontUI);
             if (g_hFontTitle) DeleteObject(g_hFontTitle);
             if (g_hFontMono) DeleteObject(g_hFontMono);
+            if (g_hTrayMenu) DestroyMenu(g_hTrayMenu);
             PostQuitMessage(0);
             return 0;
         }
@@ -571,7 +602,6 @@ void DrawToggleSwitch(HDC hdc, int x, int y, BOOL enabled, BOOL hover)
     RoundRect(hdc, x, y, x + width, y + height, 12, 12);
     
     // Knob shadow
-    COLORREF shadowColor = RGB(0, 0, 0);
     HBRUSH shadowBrush = CreateSolidBrush(RGB(200, 200, 210));
     SelectObject(hdc, shadowBrush);
     Ellipse(hdc, knobX + 1, knobY + 1, knobX + knobSize + 1, knobY + knobSize + 1);
@@ -689,7 +719,7 @@ void AddTrayIcon(HWND hWnd)
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = CreateNeonIcon(TRUE);
+    g_nid.hIcon = CreateNeonIcon(g_proxyEnabled);
     wcscpy_s(g_nid.szTip, 128, L"Proxy Switcher");
     
     Shell_NotifyIconW(NIM_ADD, &g_nid);
@@ -700,21 +730,41 @@ void RemoveTrayIcon(void)
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
 }
 
+void UpdateTrayIcon(BOOL enabled)
+{
+    if (g_nid.hWnd)
+    {
+        if (g_nid.hIcon)
+            DestroyIcon(g_nid.hIcon);
+        g_nid.hIcon = CreateNeonIcon(enabled);
+        g_nid.uFlags = NIF_ICON;
+        Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+    }
+}
+
 void ShowTrayMenu(HWND hWnd)
 {
-    HMENU hMenu = CreatePopupMenu();
+    if (g_hTrayMenu)
+        DestroyMenu(g_hTrayMenu);
     
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"📱 Show Window");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_TOGGLE, L"🔄 Toggle Proxy");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"❌ Exit");
+    g_hTrayMenu = CreatePopupMenu();
+    
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_SHOW, L"📱 Show Window");
+    AppendMenuW(g_hTrayMenu, MF_SEPARATOR, 0, NULL);
+    
+    if (g_proxyEnabled)
+        AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_TOGGLE, L"🟢 Disable Proxy");
+    else
+        AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_TOGGLE, L"🔴 Enable Proxy");
+    
+    AppendMenuW(g_hTrayMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(g_hTrayMenu, MF_STRING, ID_TRAY_EXIT, L"❌ Exit");
     
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(hWnd);
     
-    int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hWnd, NULL);
+    int cmd = TrackPopupMenu(g_hTrayMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hWnd, NULL);
     
     switch (cmd)
     {
@@ -726,13 +776,12 @@ void ShowTrayMenu(HWND hWnd)
             g_proxyEnabled = !g_proxyEnabled;
             SetProxyState(g_proxyEnabled);
             UpdateProxyStatusUI();
+            UpdateTrayIcon(g_proxyEnabled);
             break;
         case ID_TRAY_EXIT:
             DestroyWindow(hWnd);
             break;
     }
-    
-    DestroyMenu(hMenu);
 }
 
 // ==================== UI Helpers ====================
@@ -758,21 +807,58 @@ HICON CreateNeonIcon(BOOL active)
     HBITMAP hBitmap = CreateCompatibleBitmap(hdc, 32, 32);
     HBITMAP hOldBitmap = SelectObject(memDC, hBitmap);
     
-    // Icon background
-    HBRUSH hBrush = CreateSolidBrush(active ? RGB(0, 120, 255) : RGB(180, 180, 190));
-    HPEN hPen = CreatePen(PS_SOLID, 2, active ? RGB(0, 100, 220) : RGB(160, 160, 170));
+    // پر کردن پس‌زمینه شفاف
+    RECT rcFull = {0, 0, 32, 32};
+    HBRUSH bgBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(memDC, &rcFull, bgBrush);
+    DeleteObject(bgBrush);
+    
+    // انتخاب رنگ بر اساس وضعیت فعال بودن پروکسی
+    COLORREF mainColor, darkColor, glowColor;
+    if (active)
+    {
+        mainColor = RGB(0, 200, 83);      // سبز برای فعال
+        darkColor = RGB(0, 150, 60);
+        glowColor = RGB(100, 255, 150);
+    }
+    else
+    {
+        mainColor = RGB(180, 180, 190);   // خاکستری برای غیرفعال
+        darkColor = RGB(150, 150, 160);
+        glowColor = RGB(210, 210, 220);
+    }
+    
+    // افکت هاله (glow)
+    for (int r = 14; r <= 18; r++)
+    {
+        HBRUSH glowBrush = CreateSolidBrush(glowColor);
+        HPEN glowPen = CreatePen(PS_SOLID, 1, glowColor);
+        SelectObject(memDC, glowBrush);
+        SelectObject(memDC, glowPen);
+        Ellipse(memDC, 16 - r, 16 - r, 16 + r, 16 + r);
+        DeleteObject(glowBrush);
+        DeleteObject(glowPen);
+    }
+    
+    // دایره اصلی
+    HBRUSH hBrush = CreateSolidBrush(mainColor);
+    HPEN hPen = CreatePen(PS_SOLID, 2, darkColor);
     
     SelectObject(memDC, hBrush);
     SelectObject(memDC, hPen);
-    Ellipse(memDC, 2, 2, 30, 30);
+    Ellipse(memDC, 4, 4, 28, 28);
     
+    // نشانگر وضعیت (✓ برای فعال، ● برای غیرفعال)
     SetBkMode(memDC, TRANSPARENT);
     SetTextColor(memDC, RGB(255, 255, 255));
     HFONT hFont = CreateFontW(18, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     SelectObject(memDC, hFont);
     
     RECT rcText = {0, 0, 32, 32};
-    DrawTextW(memDC, L"N", 1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (active)
+        DrawTextW(memDC, L"✓", 1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    else
+        DrawTextW(memDC, L"●", 1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     
     SelectObject(memDC, hOldBitmap);
     DeleteObject(hBrush);
