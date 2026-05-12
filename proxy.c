@@ -1,5 +1,6 @@
 /**
  * Proxy Switcher v2.0 - Glass Widget Edition (Light Theme)
+ * Professional Real-time Proxy Monitor (IP, Port, Enable/Disable)
  * Build: gcc -O2 -s proxy.c -o ProxySwitcher.exe -lgdi32 -luser32 -lkernel32 -ladvapi32 -lwininet -lshell32 -ldwmapi -lcomctl32 -lmsimg32 -mwindows
  */
 
@@ -26,6 +27,8 @@
 #define WINDOW_HEIGHT       200
 #define CORNER_RADIUS       16
 #define WM_TRAYICON         (WM_APP + 1)
+#define WM_USER_UPDATE_PROXY     (WM_APP + 2)
+#define WM_USER_UPDATE_PROXYFULL (WM_APP + 3)
 #define ID_TRAY_EXIT        1001
 #define ID_TRAY_SHOW        1002
 #define ID_TRAY_TOGGLE      1003
@@ -68,7 +71,9 @@ BOOL            g_dragging          = FALSE;
 WNDPROC         g_oldIPProc         = NULL;
 WNDPROC         g_oldPortProc       = NULL;
 HMENU           g_hTrayMenu         = NULL;
-HANDLE          g_hMutex            = NULL;  // برای تک‌نسخه بودن برنامه
+HANDLE          g_hMutex            = NULL;
+HANDLE          g_hMonitorThread    = NULL;
+BOOL            g_bMonitorRunning   = TRUE;
 
 // ==================== Forward Declarations ====================
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -90,19 +95,17 @@ void PaintWindow(HWND hWnd, HDC hdc);
 void DrawRoundedButton(HDC hdc, RECT* rc, COLORREF bg, BOOL hover, BOOL pressed);
 void DrawToggleSwitch(HDC hdc, int x, int y, BOOL enabled, BOOL hover);
 COLORREF LightenColor(COLORREF color, int amount);
+DWORD WINAPI MonitorProxyChanges(LPVOID lpParam);
 
 // ==================== WinMain ====================
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-    // اطمینان از تک‌نسخه بودن برنامه
     g_hMutex = CreateMutexW(NULL, TRUE, L"Global\\ProxySwitcher_Unique_Mutex");
     if (g_hMutex == NULL || GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        // نسخه دیگری از برنامه در حال اجراست
         HWND hWndExisting = FindWindowW(APP_NAME, NULL);
         if (hWndExisting)
         {
-            // اگر پنجره مخفی است، آن را نشان بده
             if (!IsWindowVisible(hWndExisting))
                 ShowWindow(hWndExisting, SW_SHOW);
             SetForegroundWindow(hWndExisting);
@@ -127,6 +130,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     AddTrayIcon(g_hWnd);
     UpdateTrayIcon(g_proxyEnabled);
     
+    g_hMonitorThread = CreateThread(NULL, 0, MonitorProxyChanges, NULL, 0, NULL);
+    
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0))
     {
@@ -134,11 +139,47 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         DispatchMessageW(&msg);
     }
     
+    g_bMonitorRunning = FALSE;
+    if (g_hMonitorThread)
+        WaitForSingleObject(g_hMonitorThread, 1000);
+    
     RemoveTrayIcon();
     
     if (g_hMutex) CloseHandle(g_hMutex);
     
     return (int)msg.wParam;
+}
+
+// ==================== Monitor Thread (با نظارت کامل بر IP, Port, Status) ====================
+DWORD WINAPI MonitorProxyChanges(LPVOID lpParam)
+{
+    HKEY hKey;
+    DWORD dwFilter = REG_NOTIFY_CHANGE_LAST_SET;
+    
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+        0, KEY_NOTIFY, &hKey) == ERROR_SUCCESS)
+    {
+        while (g_bMonitorRunning)
+        {
+            if (RegNotifyChangeKeyValue(hKey, TRUE, dwFilter, NULL, FALSE) == ERROR_SUCCESS)
+            {
+                BOOL newState = IsProxyEnabled();
+                
+                wchar_t ip[256] = {0}, port[64] = {0};
+                GetCurrentProxy(ip, 256, port, 64);
+                
+                wchar_t* fullData = (wchar_t*)malloc(512 * sizeof(wchar_t));
+                if (fullData)
+                {
+                    wsprintfW(fullData, L"%s\n%s", ip, port);
+                    PostMessage(g_hWnd, WM_USER_UPDATE_PROXYFULL, newState, (LPARAM)fullData);
+                }
+            }
+        }
+        RegCloseKey(hKey);
+    }
+    return 0;
 }
 
 // ==================== Window Registration ====================
@@ -176,10 +217,8 @@ HWND CreateMainWindow(HINSTANCE hInstance, int nCmdShow)
     
     if (!hWnd) return NULL;
     
-    // Glass effect with slight transparency
     SetLayeredWindowAttributes(hWnd, 0, 245, LWA_ALPHA);
     
-    // Window corner preference
     DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_ROUND;
     DwmSetWindowAttribute(hWnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
     
@@ -201,18 +240,15 @@ void CreateControls(HWND hParent)
 {
     HINSTANCE hInst = g_hInst;
     
-    // Modern fonts
     g_hFontUI    = CreateFontW(16, 0, 0, 0, FW_NORMAL, 0, 0, 0, 0, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g_hFontTitle = CreateFontW(18, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g_hFontMono  = CreateFontW(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, 0, 0, 0, CLEARTYPE_QUALITY, 0, L"Consolas");
     
-    // Title
     g_hTitleLabel = CreateWindowExW(0, L"STATIC", L"Proxy Switcher",
         WS_CHILD | WS_VISIBLE | SS_CENTER,
         10, 8, 270, 22, hParent, NULL, hInst, NULL);
     SendMessageW(g_hTitleLabel, WM_SETFONT, (WPARAM)g_hFontTitle, TRUE);
     
-    // IP Input
     g_hIPInput = CreateWindowExW(0, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | ES_LEFT | ES_AUTOHSCROLL,
         12, 38, 180, 30, hParent, NULL, hInst, NULL);
@@ -220,7 +256,6 @@ void CreateControls(HWND hParent)
     SendMessageW(g_hIPInput, EM_SETCUEBANNER, FALSE, (LPARAM)L"IP Address (127.0.0.1)");
     g_oldIPProc = (WNDPROC)SetWindowLongPtrW(g_hIPInput, GWLP_WNDPROC, (LONG_PTR)InputSubclassProc);
     
-    // Port Input
     g_hPortInput = CreateWindowExW(0, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | ES_LEFT | ES_NUMBER,
         200, 38, 78, 30, hParent, NULL, hInst, NULL);
@@ -228,28 +263,23 @@ void CreateControls(HWND hParent)
     SendMessageW(g_hPortInput, EM_SETCUEBANNER, FALSE, (LPARAM)L"Port");
     g_oldPortProc = (WNDPROC)SetWindowLongPtrW(g_hPortInput, GWLP_WNDPROC, (LONG_PTR)InputSubclassProc);
     
-    // Apply Button
     g_hApplyBtn = CreateWindowExW(0, L"BUTTON", L"Apply",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         12, 78, 266, 34, hParent, (HMENU)BTN_APPLY, hInst, NULL);
     
-    // Toggle Switch Area (custom drawn)
     g_hToggleBtn = CreateWindowExW(0, L"BUTTON", L"",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         12, 122, 210, 30, hParent, (HMENU)BTN_TOGGLE, hInst, NULL);
     
-    // Status Indicator
     g_hStatusIndicator = CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | WS_VISIBLE | SS_CENTER,
         228, 124, 50, 26, hParent, NULL, hInst, NULL);
     SendMessageW(g_hStatusIndicator, WM_SETFONT, (WPARAM)g_hFontUI, TRUE);
     
-    // Tray Button
     g_hTrayBtn = CreateWindowExW(0, L"BUTTON", L"",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         12, 162, 130, 28, hParent, (HMENU)BTN_TRAY, hInst, NULL);
     
-    // Close Button
     g_hCloseBtn = CreateWindowExW(0, L"BUTTON", L"",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         152, 162, 126, 28, hParent, (HMENU)BTN_CLOSE, hInst, NULL);
@@ -328,6 +358,35 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (inputBrush) DeleteObject(inputBrush);
             inputBrush = CreateSolidBrush(COLOR_BG_INPUT);
             return (LRESULT)inputBrush;
+        }
+        
+        case WM_USER_UPDATE_PROXYFULL:
+        {
+            wchar_t* fullData = (wchar_t*)lParam;
+            BOOL newState = (BOOL)wParam;
+            
+            if (fullData)
+            {
+                wchar_t ip[256] = {0}, port[64] = {0};
+                wchar_t* newline = wcschr(fullData, L'\n');
+                if (newline)
+                {
+                    wcsncpy_s(ip, 256, fullData, newline - fullData);
+                    wcscpy_s(port, 64, newline + 1);
+                    
+                    SetWindowTextW(g_hIPInput, ip);
+                    SetWindowTextW(g_hPortInput, port);
+                }
+                free(fullData);
+            }
+            
+            if (newState != g_proxyEnabled)
+            {
+                g_proxyEnabled = newState;
+                UpdateProxyStatusUI();
+                UpdateTrayIcon(g_proxyEnabled);
+            }
+            return 0;
         }
         
         case WM_LBUTTONDOWN:
@@ -527,7 +586,6 @@ void PaintWindow(HWND hWnd, HDC hdc)
     HBITMAP memBitmap = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
     HBITMAP oldBitmap = SelectObject(memDC, memBitmap);
     
-    // White glass background with subtle gradient
     for (int i = 0; i < rc.bottom; i++)
     {
         int whiteness = 245 + (int)(10.0 * i / rc.bottom);
@@ -540,28 +598,23 @@ void PaintWindow(HWND hWnd, HDC hdc)
         DeleteObject(pen);
     }
     
-    // Main border
     HPEN borderPen = CreatePen(PS_SOLID, 1, COLOR_BORDER);
     HBRUSH bgBrush = CreateSolidBrush(COLOR_BG_PRIMARY);
     SelectObject(memDC, bgBrush);
     SelectObject(memDC, borderPen);
     RoundRect(memDC, 0, 0, rc.right, rc.bottom, CORNER_RADIUS, CORNER_RADIUS);
     
-    // Blue accent glow
     HPEN glowPen = CreatePen(PS_SOLID, 2, COLOR_ACCENT);
     SelectObject(memDC, glowPen);
     SelectObject(memDC, GetStockObject(NULL_BRUSH));
     RoundRect(memDC, 1, 1, rc.right - 1, rc.bottom - 1, CORNER_RADIUS - 1, CORNER_RADIUS - 1);
     
-    // Subtle outer glow
     HPEN softGlowPen = CreatePen(PS_SOLID, 1, RGB(180, 210, 255));
     SelectObject(memDC, softGlowPen);
     RoundRect(memDC, 2, 2, rc.right - 2, rc.bottom - 2, CORNER_RADIUS - 2, CORNER_RADIUS - 2);
     
-    // Copy to screen
     BitBlt(hdc, 0, 0, rc.right, rc.bottom, memDC, 0, 0, SRCCOPY);
     
-    // Cleanup
     SelectObject(memDC, oldBitmap);
     DeleteObject(memBitmap);
     DeleteDC(memDC);
@@ -593,7 +646,6 @@ void DrawToggleSwitch(HDC hdc, int x, int y, BOOL enabled, BOOL hover)
     int knobX = enabled ? x + width - knobSize - 3 : x + 3;
     int knobY = y + (height - knobSize) / 2;
     
-    // Track background
     COLORREF trackColor = enabled ? COLOR_SUCCESS : RGB(200, 200, 210);
     HBRUSH trackBrush = CreateSolidBrush(trackColor);
     HPEN trackPen = CreatePen(PS_SOLID, 1, trackColor);
@@ -601,12 +653,10 @@ void DrawToggleSwitch(HDC hdc, int x, int y, BOOL enabled, BOOL hover)
     SelectObject(hdc, trackPen);
     RoundRect(hdc, x, y, x + width, y + height, 12, 12);
     
-    // Knob shadow
     HBRUSH shadowBrush = CreateSolidBrush(RGB(200, 200, 210));
     SelectObject(hdc, shadowBrush);
     Ellipse(hdc, knobX + 1, knobY + 1, knobX + knobSize + 1, knobY + knobSize + 1);
     
-    // Knob
     COLORREF knobColor = RGB(255, 255, 255);
     HBRUSH knobBrush = CreateSolidBrush(knobColor);
     HPEN knobPen = CreatePen(PS_SOLID, 1, RGB(210, 210, 220));
@@ -807,28 +857,25 @@ HICON CreateNeonIcon(BOOL active)
     HBITMAP hBitmap = CreateCompatibleBitmap(hdc, 32, 32);
     HBITMAP hOldBitmap = SelectObject(memDC, hBitmap);
     
-    // پر کردن پس‌زمینه شفاف
     RECT rcFull = {0, 0, 32, 32};
     HBRUSH bgBrush = CreateSolidBrush(RGB(255, 255, 255));
     FillRect(memDC, &rcFull, bgBrush);
     DeleteObject(bgBrush);
     
-    // انتخاب رنگ بر اساس وضعیت فعال بودن پروکسی
     COLORREF mainColor, darkColor, glowColor;
     if (active)
     {
-        mainColor = RGB(0, 200, 83);      // سبز برای فعال
+        mainColor = RGB(0, 200, 83);
         darkColor = RGB(0, 150, 60);
         glowColor = RGB(100, 255, 150);
     }
     else
     {
-        mainColor = RGB(180, 180, 190);   // خاکستری برای غیرفعال
+        mainColor = RGB(180, 180, 190);
         darkColor = RGB(150, 150, 160);
         glowColor = RGB(210, 210, 220);
     }
     
-    // افکت هاله (glow)
     for (int r = 14; r <= 18; r++)
     {
         HBRUSH glowBrush = CreateSolidBrush(glowColor);
@@ -840,7 +887,6 @@ HICON CreateNeonIcon(BOOL active)
         DeleteObject(glowPen);
     }
     
-    // دایره اصلی
     HBRUSH hBrush = CreateSolidBrush(mainColor);
     HPEN hPen = CreatePen(PS_SOLID, 2, darkColor);
     
@@ -848,7 +894,6 @@ HICON CreateNeonIcon(BOOL active)
     SelectObject(memDC, hPen);
     Ellipse(memDC, 4, 4, 28, 28);
     
-    // نشانگر وضعیت (✓ برای فعال، ● برای غیرفعال)
     SetBkMode(memDC, TRANSPARENT);
     SetTextColor(memDC, RGB(255, 255, 255));
     HFONT hFont = CreateFontW(18, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
